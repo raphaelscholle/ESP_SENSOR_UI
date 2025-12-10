@@ -13,6 +13,8 @@ Arduino/PlatformIO firmware for the Waveshare ESP32-C3-Zero that exposes a rich 
 1. Install [PlatformIO](https://platformio.org/install) or use the VS Code extension.
 2. Connect the ESP32-C3-Zero.
 3. Run `pio run --target upload` to flash and `pio device monitor` to view logs.
+   - If you previously saw `UnknownPackageError` for `ESP Async WebServer` on Windows, pull the latest code: dependencies now use
+     the ESPHome-maintained forks fetched directly from GitHub so they install cleanly across platforms.
 
 ### Windows setup tip (Python/UV error)
 If PlatformIO on Windows shows `Could not find UV-managed Python` or similar while installing dependencies, point PlatformIO to your installed Python 3.13 (or newer):
