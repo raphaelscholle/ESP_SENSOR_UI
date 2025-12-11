@@ -254,7 +254,7 @@ void updatePixels() {
     case WsMode::OFF:
       pixels.clear();
       break;
-    case WsMode::SOLID:
+    case WsMode::SOLID: {
       uint8_t solidR = (wsColor >> 16) & 0xFF;
       uint8_t solidG = (wsColor >> 8) & 0xFF;
       uint8_t solidB = wsColor & 0xFF;
@@ -263,6 +263,7 @@ void updatePixels() {
         pixels.setPixelColor(i, solidColor);
       }
       break;
+    }
     case WsMode::RAINBOW: {
       uint32_t now = millis();
       for (uint16_t i = 0; i < pixels.numPixels(); i++) {
