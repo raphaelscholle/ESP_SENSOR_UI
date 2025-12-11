@@ -426,10 +426,6 @@ String generatePage() {
         <section class="page active" data-page="home">
           <h2>Draggable widget canvas</h2>
           <p>Drop and rearrange sensor summary widgets. Live data updates every few seconds.</p>
-          <div class="draggable-area" id="widget-area">
-            <div class="widget" draggable="true" style="top:18px; left:18px;" data-widget="summary">Status widget</div>
-            <div class="widget" draggable="true" style="top:120px; left:120px;" data-widget="light">Lighting widget</div>
-          </div>
           <h2>Live sensor values</h2>
           <div class="grid" id="live-grid"></div>
         </section>
