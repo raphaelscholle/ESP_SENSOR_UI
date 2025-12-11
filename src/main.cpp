@@ -8,32 +8,17 @@
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_SI1145.h>
 
+#include <algorithm>
 #include <array>
 
-struct SunlightSensorConfig {
-  bool enabled = true;
-  uint8_t address = 0x60;
-  uint8_t sda = 6;
-  uint8_t scl = 7;
-};
-
-struct DeviceConfig {
-  String wifiSsid = "";
-  String wifiPassword = "";
-  String mqttHost = "";
-  uint16_t mqttPort = 1883;
-  String mqttUser = "";
-  String mqttPassword = "";
-  String baseTopic = "esp/sensors";
-  uint8_t wsPin = 10;            // Onboard WS2812B pin on ESP32-C3-Zero
-  uint16_t wsCount = 1;         // Single on-board pixel
-  String wsTopic = "light/ws2812";
-  String sunlightTopic = "sunlight";
-  uint8_t i2cSda = 3;           // Default pins for ESP32-C3
-  uint8_t i2cScl = 2;
-  uint8_t sunlightCount = 1;
-  SunlightSensorConfig sunlight[4];
-};
+#include "main.h"
+#include "menu_home.h"
+#include "menu_lighting.h"
+#include "menu_mqtt.h"
+#include "menu_nav.h"
+#include "menu_sensors.h"
+#include "menu_wifi.h"
+#include "ui_styles.h"
 
 static const size_t kMaxSunlightSensors = 4;
 static DeviceConfig config;
@@ -373,212 +358,30 @@ String generatePage() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>ESP32-C3 Sensor UI</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: 'Inter', system-ui, sans-serif; background: radial-gradient(circle at 10% 20%, #18152a, #0d0a1a 60%); color: #f2f2fb; margin: 0; padding: 0; }
-  .shell { max-width: 1200px; margin: 32px auto; padding: 20px; }
-  .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); backdrop-filter: blur(12px); }
-  h1 { letter-spacing: 0.5px; font-size: 26px; margin-top: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  h2 { color: #a7b9ff; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; margin: 24px 0 12px; }
-  form { display: grid; gap: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-  label { font-size: 12px; color: #8ea0d0; text-transform: uppercase; letter-spacing: 0.5px; }
-  input, select { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.08); color: #fff; font-size: 14px; box-sizing: border-box; }
-  input:focus, select:focus { outline: 2px solid #6b8cff; }
-  .accent { color: #6bffdf; }
-  .actions { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
-  button { padding: 12px 18px; border-radius: 12px; border: none; color: #0b0b16; background: linear-gradient(120deg, #6bffdf, #6b8cff); font-weight: 700; letter-spacing: 0.5px; cursor: pointer; box-shadow: 0 12px 30px rgba(107, 143, 255, 0.3); }
-  .pill-nav { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; list-style: none; }
-  .pill-nav a { text-decoration: none; color: #cdd7ff; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); display: inline-flex; gap: 8px; align-items: center; }
-  .pill-nav a.active, .pill-nav a:hover { background: rgba(255,255,255,0.12); }
-  .metric { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 4px; }
-  .metric .value { font-size: 22px; font-weight: 700; color: #fff; }
-  .metric small { color: #9ab4ff; }
-  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #f39b39; display: inline-block; }
-  .page { display: none; }
-  .page.active { display: block; }
-  .switch-row { display: flex; align-items: center; gap: 10px; }
+)HTML";
+  page += FPSTR(kBaseStyles);
+  page += R"HTML(
 </style>
 </head>
 <body>
   <div class="shell">
     <div class="card">
       <h1>ESP32-C3 Sensor Studio</h1>
-      <ul class="pill-nav" id="nav">
-        <li><a href="#home" data-page="home" class="active">Home</a></li>
-        <li><a href="#wifi" data-page="wifi">Wi-Fi</a></li>
-        <li><a href="#mqtt" data-page="mqtt">MQTT</a></li>
-        <li><a href="#lighting" data-page="lighting">Lighting</a></li>
-        <li><a href="#sensors" data-page="sensors">Sensors</a></li>
-)HTML";
+      )HTML";
 
-  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
-    page += "        <li><a href=\"#sensor" + String(i + 1) + "\" data-page=\"sensor" + String(i + 1) + "\">Sunlight " + String(i + 1) + "</a></li>\n";
-  }
+  appendNavigation(page, std::min<size_t>(config.sunlightCount, kMaxSunlightSensors));
 
   page += R"HTML(
-      </ul>
-
       <form id="config-form" method="POST" action="/config">
-        <section class="page active" data-page="home">
-          <h2>Live sensor values</h2>
-          <div class="grid" id="live-grid"></div>
-        </section>
-
-        <section class="page" data-page="wifi">
-          <h2>Connectivity</h2>
-          <div class="grid">
-            <div>
-              <label>Wi-Fi SSID</label>
-              <input name="ssid" value=")HTML";
-  page += urlEncode(config.wifiSsid);
-  page += R"HTML(" placeholder="MyWiFi" />
-            </div>
-            <div>
-              <label>Wi-Fi Password</label>
-              <input name="wifipw" type="password" value=")HTML";
-  page += urlEncode(config.wifiPassword);
-  page += R"HTML(" placeholder="••••••" />
-            </div>
-          </div>
-        </section>
-
-        <section class="page" data-page="mqtt">
-          <h2>MQTT Broker</h2>
-          <div class="grid">
-            <div>
-              <label>MQTT Host</label>
-              <input name="mqhost" value=")HTML";
-  page += urlEncode(config.mqttHost);
-  page += R"HTML(" placeholder="192.168.1.10" />
-            </div>
-            <div>
-              <label>MQTT Port</label>
-              <input name="mqport" type="number" value=")HTML";
-  page += String(config.mqttPort);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>MQTT Username</label>
-              <input name="mquser" value=")HTML";
-  page += urlEncode(config.mqttUser);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>MQTT Password</label>
-              <input name="mqpw" type="password" value=")HTML";
-  page += urlEncode(config.mqttPassword);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>Base Topic</label>
-              <input name="baset" value=")HTML";
-  page += urlEncode(config.baseTopic);
-  page += R"HTML(" />
-            </div>
-          </div>
-        </section>
-
-        <section class="page" data-page="lighting">
-          <h2>WS2812B setup</h2>
-          <div class="grid">
-            <div>
-              <label>LED Pin</label>
-              <input name="wspin" type="number" value=")HTML";
-  page += String(config.wsPin);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>LED Count</label>
-              <input name="wscount" type="number" value=")HTML";
-  page += String(config.wsCount);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>LED Topic</label>
-              <input name="wstopic" value=")HTML";
-  page += urlEncode(config.wsTopic);
-  page += R"HTML(" />
-            </div>
-          </div>
-          <h2>LED animations</h2>
-          <div id="light-form">
-            <div class="grid">
-              <div>
-                <label>Mode</label>
-                <select name="mode" id="mode-select">
-                  <option value="off">Off</option>
-                  <option value="solid">Solid color</option>
-                  <option value="rainbow">Rainbow</option>
-                  <option value="breathe">Breathe</option>
-                </select>
-              </div>
-              <div>
-                <label>Color</label>
-                <input type="color" name="color" id="color-picker" value="#6bffdf" />
-              </div>
-            </div>
-            <div class="actions">
-              <button type="button" id="light-submit">Send to LED</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="page" data-page="sensors">
-          <h2>Sensor overview</h2>
-          <p>Set how many Grove Sunlight sensors you have connected and provide defaults for addressing.</p>
-          <div class="grid">
-            <div>
-              <label>Number of sensors</label>
-              <input name="sun_count" type="number" min="1" max="4" value=")HTML";
-  page += String(config.sunlightCount);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>Default I2C SDA</label>
-              <input name="sdapin" type="number" value=")HTML";
-  page += String(config.i2cSda);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>Default I2C SCL</label>
-              <input name="sclpin" type="number" value=")HTML";
-  page += String(config.i2cScl);
-  page += R"HTML(" />
-            </div>
-            <div>
-              <label>Sunlight Topic</label>
-              <input name="suntopic" value=")HTML";
-  page += urlEncode(config.sunlightTopic);
-  page += R"HTML(" />
-            </div>
-          </div>
-        </section>
 )HTML";
+  appendHomeMenu(page);
+  appendWifiMenu(page, config);
+  appendMqttMenu(page, config);
+  appendLightingMenu(page, config);
+  appendSensorsMenu(page, config);
 
   for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
-    const auto &cfg = config.sunlight[i];
-    page += "        <section class=\"page\" data-page=\"sensor" + String(i + 1) + "\">\n";
-    page += "          <h2>Sensor " + String(i + 1) + "</h2>\n";
-    page += "          <div class=\"grid\">\n";
-    page += "            <div class=\"switch-row\">\n";
-    page += "              <label style=\"width:160px\">Enable sensor</label>\n";
-    page += "              <input type=\"checkbox\" name=\"sun_en" + String(i) + "\"" + (cfg.enabled ? " checked" : "") + " />\n";
-    page += "            </div>\n";
-    page += "            <div>\n";
-    page += "              <label>I2C address</label>\n";
-    page += "              <input name=\"sun_addr" + String(i) + "\" type=\"number\" value=\"" + String(cfg.address) + "\" />\n";
-    page += "            </div>\n";
-    page += "            <div>\n";
-    page += "              <label>SDA pin</label>\n";
-    page += "              <input name=\"sun_sda" + String(i) + "\" type=\"number\" value=\"" + String(cfg.sda) + "\" />\n";
-    page += "            </div>\n";
-    page += "            <div>\n";
-    page += "              <label>SCL pin</label>\n";
-    page += "              <input name=\"sun_scl" + String(i) + "\" type=\"number\" value=\"" + String(cfg.scl) + "\" />\n";
-    page += "            </div>\n";
-    page += "          </div>\n";
-    page += "          <p>Live reading and status for this sensor will appear on the Home page.</p>\n";
-    page += "        </section>\n";
+    appendSensorDetailMenu(page, config, i);
   }
 
   page += R"HTML(
