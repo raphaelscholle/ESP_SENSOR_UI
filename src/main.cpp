@@ -8,6 +8,15 @@
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_SI1145.h>
 
+#include <array>
+
+struct SunlightSensorConfig {
+  bool enabled = true;
+  uint8_t address = 0x60;
+  uint8_t sda = 6;
+  uint8_t scl = 7;
+};
+
 struct DeviceConfig {
   String wifiSsid = "";
   String wifiPassword = "";
@@ -22,16 +31,20 @@ struct DeviceConfig {
   String sunlightTopic = "sunlight";
   uint8_t i2cSda = 6;           // Default pins for ESP32-C3
   uint8_t i2cScl = 7;
+  uint8_t sunlightCount = 1;
+  SunlightSensorConfig sunlight[4];
 };
 
+static const size_t kMaxSunlightSensors = 4;
 static DeviceConfig config;
 static Preferences preferences;
 static WiFiClient wifiClient;
 static PubSubClient mqttClient(wifiClient);
 static AsyncWebServer server(80);
 static Adafruit_NeoPixel pixels(config.wsCount, config.wsPin, NEO_GRB + NEO_KHZ800);
-static Adafruit_SI1145 sunlightSensor;
-static bool sunlightReady = false;
+static std::array<Adafruit_SI1145, kMaxSunlightSensors> sunlightSensors;
+static std::array<bool, kMaxSunlightSensors> sunlightReady;
+
 static unsigned long lastPublish = 0;
 static unsigned long lastSensorRead = 0;
 static const unsigned long publishInterval = 10 * 1000UL;
@@ -57,7 +70,14 @@ struct SensorReadings {
   unsigned long timestamp = 0;
 };
 
-static SensorReadings currentReadings;
+static std::array<SensorReadings, kMaxSunlightSensors> sensorReadings;
+
+template <typename T>
+T clampValue(T value, T minVal, T maxVal) {
+  if (value < minVal) return minVal;
+  if (value > maxVal) return maxVal;
+  return value;
+}
 
 // Forward declarations
 void saveConfig();
@@ -65,7 +85,7 @@ void setupWebUi();
 void connectWifi();
 void connectMqtt();
 void handleWsMessage(const String &payload);
-void configureSunlightSensor();
+void configureSunlightSensors();
 void publishSunlight();
 void refreshSunlightReadings();
 void updatePixels();
@@ -100,6 +120,15 @@ void loadConfig() {
   config.sunlightTopic = preferences.getString("sunTopic", config.sunlightTopic);
   config.i2cSda = preferences.getUChar("i2cSda", config.i2cSda);
   config.i2cScl = preferences.getUChar("i2cScl", config.i2cScl);
+  config.sunlightCount = clampValue<uint8_t>(preferences.getUChar("sunCnt", config.sunlightCount), 1, kMaxSunlightSensors);
+
+  for (size_t i = 0; i < kMaxSunlightSensors; ++i) {
+    String base = "sun" + String(i);
+    config.sunlight[i].enabled = preferences.getBool((base + "En").c_str(), i == 0);
+    config.sunlight[i].address = preferences.getUChar((base + "Ad").c_str(), 0x60);
+    config.sunlight[i].sda = preferences.getUChar((base + "Sda").c_str(), config.i2cSda);
+    config.sunlight[i].scl = preferences.getUChar((base + "Scl").c_str(), config.i2cScl);
+  }
   preferences.end();
 }
 
@@ -118,6 +147,15 @@ void saveConfig() {
   preferences.putString("sunTopic", config.sunlightTopic);
   preferences.putUChar("i2cSda", config.i2cSda);
   preferences.putUChar("i2cScl", config.i2cScl);
+  preferences.putUChar("sunCnt", config.sunlightCount);
+
+  for (size_t i = 0; i < kMaxSunlightSensors; ++i) {
+    String base = "sun" + String(i);
+    preferences.putBool((base + "En").c_str(), config.sunlight[i].enabled);
+    preferences.putUChar((base + "Ad").c_str(), config.sunlight[i].address);
+    preferences.putUChar((base + "Sda").c_str(), config.sunlight[i].sda);
+    preferences.putUChar((base + "Scl").c_str(), config.sunlight[i].scl);
+  }
   preferences.end();
 }
 
@@ -207,7 +245,8 @@ uint32_t parseColor(const String &value) {
 }
 
 void handleWsMessage(const String &payload) {
-  String lower = payload; lower.toLowerCase();
+  String lower = payload;
+  lower.toLowerCase();
   if (lower.startsWith("color:")) {
     wsMode = WsMode::SOLID;
     wsColor = parseColor(payload.substring(6));
@@ -269,32 +308,63 @@ void updatePixels() {
 }
 
 void publishSunlight() {
-  if (!sunlightReady || !mqttClient.connected()) {
+  if (!mqttClient.connected()) {
     return;
   }
-  refreshSunlightReadings();
 
-  String topicBase = config.baseTopic + "/" + config.sunlightTopic;
-  mqttClient.publish((topicBase + "/visible").c_str(), String(currentReadings.visible).c_str(), true);
-  mqttClient.publish((topicBase + "/ir").c_str(), String(currentReadings.ir).c_str(), true);
-  mqttClient.publish((topicBase + "/uv").c_str(), String(currentReadings.uv).c_str(), true);
+  refreshSunlightReadings();
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    if (!config.sunlight[i].enabled || !sunlightReady[i]) {
+      continue;
+    }
+    String topicBase = config.baseTopic + "/" + config.sunlightTopic + "/" + String(i + 1);
+    mqttClient.publish((topicBase + "/visible").c_str(), String(sensorReadings[i].visible).c_str(), true);
+    mqttClient.publish((topicBase + "/ir").c_str(), String(sensorReadings[i].ir).c_str(), true);
+    mqttClient.publish((topicBase + "/uv").c_str(), String(sensorReadings[i].uv).c_str(), true);
+  }
 }
 
 void refreshSunlightReadings() {
-  if (!sunlightReady) {
-    currentReadings = {};
-    return;
+  for (size_t i = 0; i < kMaxSunlightSensors; ++i) {
+    sensorReadings[i] = {};
   }
 
-  currentReadings.visible = sunlightSensor.readVisible();
-  currentReadings.ir = sunlightSensor.readIR();
-  currentReadings.uv = sunlightSensor.readUV() / 100.0; // library returns *100
-  currentReadings.timestamp = millis();
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    const auto &cfg = config.sunlight[i];
+    if (!cfg.enabled || !sunlightReady[i]) {
+      continue;
+    }
+    Wire.begin(cfg.sda, cfg.scl);
+    sensorReadings[i].visible = sunlightSensors[i].readVisible();
+    sensorReadings[i].ir = sunlightSensors[i].readIR();
+    sensorReadings[i].uv = sunlightSensors[i].readUV() / 100.0; // library returns *100
+    sensorReadings[i].timestamp = millis();
+  }
+}
+
+String buildSensorsJson() {
+  String json = "{\"sensors\":[";
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    if (i > 0) json += ',';
+    bool enabled = config.sunlight[i].enabled;
+    bool ready = sunlightReady[i];
+    json += "{";
+    json += "\"index\":" + String(i + 1);
+    json += ",\"enabled\":" + String(enabled ? "true" : "false");
+    json += ",\"ready\":" + String(ready ? "true" : "false");
+    json += ",\"visible\":" + String(sensorReadings[i].visible);
+    json += ",\"ir\":" + String(sensorReadings[i].ir);
+    json += ",\"uv\":" + String(sensorReadings[i].uv);
+    json += ",\"timestamp\":" + String(sensorReadings[i].timestamp);
+    json += "}";
+  }
+  json += "]}";
+  return json;
 }
 
 String generatePage() {
   String page;
-  page.reserve(4000);
+  page.reserve(7000);
   page += R"HTML(
 <!DOCTYPE html>
 <html lang="en">
@@ -303,12 +373,14 @@ String generatePage() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>ESP32-C3 Sensor UI</title>
 <style>
+  :root { color-scheme: dark; }
   body { font-family: 'Inter', system-ui, sans-serif; background: radial-gradient(circle at 10% 20%, #18152a, #0d0a1a 60%); color: #f2f2fb; margin: 0; padding: 0; }
-  .shell { max-width: 1080px; margin: 32px auto; padding: 20px; }
+  .shell { max-width: 1200px; margin: 32px auto; padding: 20px; }
   .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); backdrop-filter: blur(12px); }
   h1 { letter-spacing: 0.5px; font-size: 26px; margin-top: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   h2 { color: #a7b9ff; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; margin: 24px 0 12px; }
-  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  form { display: grid; gap: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   label { font-size: 12px; color: #8ea0d0; text-transform: uppercase; letter-spacing: 0.5px; }
   input, select { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.08); color: #fff; font-size: 14px; box-sizing: border-box; }
   input:focus, select:focus { outline: 2px solid #6b8cff; }
@@ -316,197 +388,294 @@ String generatePage() {
   .actions { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
   button { padding: 12px 18px; border-radius: 12px; border: none; color: #0b0b16; background: linear-gradient(120deg, #6bffdf, #6b8cff); font-weight: 700; letter-spacing: 0.5px; cursor: pointer; box-shadow: 0 12px 30px rgba(107, 143, 255, 0.3); }
   .badge { background: rgba(255,255,255,0.07); padding: 6px 10px; border-radius: 10px; display: inline-block; margin-left: 10px; font-size: 12px; color: #9bd4ff; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
   .pill-nav { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; list-style: none; }
   .pill-nav a { text-decoration: none; color: #cdd7ff; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); display: inline-flex; gap: 8px; align-items: center; }
-  .pill-nav a:hover { background: rgba(255,255,255,0.12); }
+  .pill-nav a.active, .pill-nav a:hover { background: rgba(255,255,255,0.12); }
   .metric { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 4px; }
-  .metric .value { font-size: 24px; font-weight: 700; color: #fff; }
+  .metric .value { font-size: 22px; font-weight: 700; color: #fff; }
   .metric small { color: #9ab4ff; }
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #f39b39; display: inline-block; }
+  .page { display: none; }
+  .page.active { display: block; }
+  .draggable-area { position: relative; min-height: 340px; border: 1px dashed rgba(255,255,255,0.2); border-radius: 16px; overflow: hidden; padding: 12px; }
+  .widget { position: absolute; top: 20px; left: 20px; padding: 12px 14px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; cursor: grab; user-select: none; }
+  .widget:active { cursor: grabbing; }
+  .switch-row { display: flex; align-items: center; gap: 10px; }
 </style>
 </head>
 <body>
   <div class="shell">
     <div class="card">
-      <h1>ESP32-C3 Sensor Studio <span class="badge">Web UI</span></h1>
-      <ul class="pill-nav">
-        <li><a href="#config">Configuration</a></li>
-        <li><a href="#live">Live values</a></li>
-        <li><a href="#lighting">Lighting</a></li>
+      <h1>ESP32-C3 Sensor Studio <span class="badge">Multi-page UI</span></h1>
+      <ul class="pill-nav" id="nav">
+        <li><a href="#home" data-page="home" class="active">Home</a></li>
+        <li><a href="#wifi" data-page="wifi">Wi-Fi</a></li>
+        <li><a href="#mqtt" data-page="mqtt">MQTT</a></li>
+        <li><a href="#lighting" data-page="lighting">Lighting</a></li>
+        <li><a href="#sensors" data-page="sensors">Sensors</a></li>
+)HTML";
+
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    page += "        <li><a href=\"#sensor" + String(i + 1) + "\" data-page=\"sensor" + String(i + 1) + "\">Sunlight " + String(i + 1) + "</a></li>\n";
+  }
+
+  page += R"HTML(
       </ul>
-      <p>Configure Wi-Fi, MQTT, and pins for the onboard <span class="accent">WS2812B</span> and <span class="accent">Grove Sunlight</span> modules without writing a line of code.</p>
-      <h2 id="config">Connectivity</h2>
-      <form method="POST" action="/config">
-        <div>
-          <label>Wi-Fi SSID</label>
-          <input name="ssid" value=")HTML";
+
+      <form id="config-form" method="POST" action="/config">
+        <section class="page active" data-page="home">
+          <h2>Draggable widget canvas</h2>
+          <p>Drop and rearrange sensor summary widgets. Live data updates every few seconds.</p>
+          <div class="draggable-area" id="widget-area">
+            <div class="widget" draggable="true" style="top:18px; left:18px;" data-widget="summary">Status widget</div>
+            <div class="widget" draggable="true" style="top:120px; left:120px;" data-widget="light">Lighting widget</div>
+          </div>
+          <h2>Live sensor values</h2>
+          <div class="grid" id="live-grid"></div>
+        </section>
+
+        <section class="page" data-page="wifi">
+          <h2>Connectivity</h2>
+          <div class="grid">
+            <div>
+              <label>Wi-Fi SSID</label>
+              <input name="ssid" value=")HTML";
   page += urlEncode(config.wifiSsid);
   page += R"HTML(" placeholder="MyWiFi" />
-        </div>
-        <div>
-          <label>Wi-Fi Password</label>
-          <input name="wifipw" type="password" value=")HTML";
+            </div>
+            <div>
+              <label>Wi-Fi Password</label>
+              <input name="wifipw" type="password" value=")HTML";
   page += urlEncode(config.wifiPassword);
   page += R"HTML(" placeholder="••••••" />
-        </div>
-        <div>
-          <label>MQTT Host</label>
-          <input name="mqhost" value=")HTML";
+            </div>
+          </div>
+        </section>
+
+        <section class="page" data-page="mqtt">
+          <h2>MQTT Broker</h2>
+          <div class="grid">
+            <div>
+              <label>MQTT Host</label>
+              <input name="mqhost" value=")HTML";
   page += urlEncode(config.mqttHost);
   page += R"HTML(" placeholder="192.168.1.10" />
-        </div>
-        <div>
-          <label>MQTT Port</label>
-          <input name="mqport" type="number" value=")HTML";
+            </div>
+            <div>
+              <label>MQTT Port</label>
+              <input name="mqport" type="number" value=")HTML";
   page += String(config.mqttPort);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>MQTT Username</label>
-          <input name="mquser" value=")HTML";
+            </div>
+            <div>
+              <label>MQTT Username</label>
+              <input name="mquser" value=")HTML";
   page += urlEncode(config.mqttUser);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>MQTT Password</label>
-          <input name="mqpw" type="password" value=")HTML";
+            </div>
+            <div>
+              <label>MQTT Password</label>
+              <input name="mqpw" type="password" value=")HTML";
   page += urlEncode(config.mqttPassword);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>Base Topic</label>
-          <input name="baset" value=")HTML";
+            </div>
+            <div>
+              <label>Base Topic</label>
+              <input name="baset" value=")HTML";
   page += urlEncode(config.baseTopic);
   page += R"HTML(" />
-        </div>
+            </div>
+          </div>
+        </section>
 
-        <h2>WS2812B</h2>
-        <div>
-          <label>LED Pin</label>
-          <input name="wspin" type="number" value=")HTML";
+        <section class="page" data-page="lighting">
+          <h2>WS2812B setup</h2>
+          <div class="grid">
+            <div>
+              <label>LED Pin</label>
+              <input name="wspin" type="number" value=")HTML";
   page += String(config.wsPin);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>LED Count</label>
-          <input name="wscount" type="number" value=")HTML";
+            </div>
+            <div>
+              <label>LED Count</label>
+              <input name="wscount" type="number" value=")HTML";
   page += String(config.wsCount);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>LED Topic</label>
-          <input name="wstopic" value=")HTML";
+            </div>
+            <div>
+              <label>LED Topic</label>
+              <input name="wstopic" value=")HTML";
   page += urlEncode(config.wsTopic);
   page += R"HTML(" />
-        </div>
+            </div>
+          </div>
+          <h2>LED animations</h2>
+          <div id="light-form">
+            <div class="grid">
+              <div>
+                <label>Mode</label>
+                <select name="mode" id="mode-select">
+                  <option value="off">Off</option>
+                  <option value="solid">Solid color</option>
+                  <option value="rainbow">Rainbow</option>
+                  <option value="breathe">Breathe</option>
+                </select>
+              </div>
+              <div>
+                <label>Color</label>
+                <input type="color" name="color" id="color-picker" value="#6bffdf" />
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" id="light-submit">Send to LED</button>
+            </div>
+          </div>
+        </section>
 
-        <h2>Grove Sunlight</h2>
-        <div>
-          <label>I2C SDA Pin</label>
-          <input name="sdapin" type="number" value=")HTML";
+        <section class="page" data-page="sensors">
+          <h2>Sensor overview</h2>
+          <p>Set how many Grove Sunlight sensors you have connected and provide defaults for addressing.</p>
+          <div class="grid">
+            <div>
+              <label>Number of sensors</label>
+              <input name="sun_count" type="number" min="1" max="4" value=")HTML";
+  page += String(config.sunlightCount);
+  page += R"HTML(" />
+            </div>
+            <div>
+              <label>Default I2C SDA</label>
+              <input name="sdapin" type="number" value=")HTML";
   page += String(config.i2cSda);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>I2C SCL Pin</label>
-          <input name="sclpin" type="number" value=")HTML";
+            </div>
+            <div>
+              <label>Default I2C SCL</label>
+              <input name="sclpin" type="number" value=")HTML";
   page += String(config.i2cScl);
   page += R"HTML(" />
-        </div>
-        <div>
-          <label>Sunlight Topic</label>
-          <input name="suntopic" value=")HTML";
+            </div>
+            <div>
+              <label>Sunlight Topic</label>
+              <input name="suntopic" value=")HTML";
   page += urlEncode(config.sunlightTopic);
   page += R"HTML(" />
-        </div>
+            </div>
+          </div>
+        </section>
+)HTML";
+
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    const auto &cfg = config.sunlight[i];
+    page += "        <section class=\"page\" data-page=\"sensor" + String(i + 1) + "\">\n";
+    page += "          <h2>Sensor " + String(i + 1) + "</h2>\n";
+    page += "          <div class=\"grid\">\n";
+    page += "            <div class=\"switch-row\">\n";
+    page += "              <label style=\"width:160px\">Enable sensor</label>\n";
+    page += "              <input type=\"checkbox\" name=\"sun_en" + String(i) + "\"" + (cfg.enabled ? " checked" : "") + " />\n";
+    page += "            </div>\n";
+    page += "            <div>\n";
+    page += "              <label>I2C address</label>\n";
+    page += "              <input name=\"sun_addr" + String(i) + "\" type=\"number\" value=\"" + String(cfg.address) + "\" />\n";
+    page += "            </div>\n";
+    page += "            <div>\n";
+    page += "              <label>SDA pin</label>\n";
+    page += "              <input name=\"sun_sda" + String(i) + "\" type=\"number\" value=\"" + String(cfg.sda) + "\" />\n";
+    page += "            </div>\n";
+    page += "            <div>\n";
+    page += "              <label>SCL pin</label>\n";
+    page += "              <input name=\"sun_scl" + String(i) + "\" type=\"number\" value=\"" + String(cfg.scl) + "\" />\n";
+    page += "            </div>\n";
+    page += "          </div>\n";
+    page += "          <p>Live reading and status for this sensor will appear on the Home page.</p>\n";
+    page += "        </section>\n";
+  }
+
+  page += R"HTML(
         <div class="actions">
           <button type="submit">Save & Reboot</button>
-        </div>
-      </form>
-
-      <h2 id="live">Live sensor values</h2>
-      <div class="grid" id="sensor-grid">
-        <div class="metric">
-          <div>Visible light</div>
-          <div class="value" id="vis-value">--</div>
-          <small>lux</small>
-        </div>
-        <div class="metric">
-          <div>Infrared</div>
-          <div class="value" id="ir-value">--</div>
-          <small>irradiance</small>
-        </div>
-        <div class="metric">
-          <div>UV Index</div>
-          <div class="value" id="uv-value">--</div>
-          <small>index</small>
-        </div>
-        <div class="metric">
-          <div>Sensor status</div>
-          <div class="value"><span class="status-dot" id="sensor-status"></span> <span id="sensor-label">waiting...</span></div>
-          <small>Updated <span id="sensor-time">never</span></small>
-        </div>
-      </div>
-
-      <h2 id="lighting">LED animations</h2>
-      <form id="light-form">
-        <div>
-          <label>Mode</label>
-          <select name="mode" id="mode-select">
-            <option value="off">Off</option>
-            <option value="solid">Solid color</option>
-            <option value="rainbow">Rainbow</option>
-            <option value="breathe">Breathe</option>
-          </select>
-        </div>
-        <div>
-          <label>Color</label>
-          <input type="color" name="color" id="color-picker" value="#6bffdf" />
-        </div>
-        <div class="actions">
-          <button type="submit">Send to LED</button>
         </div>
       </form>
     </div>
   </div>
   <script>
-    const statusDot = document.getElementById('sensor-status');
-    const statusLabel = document.getElementById('sensor-label');
-    const visEl = document.getElementById('vis-value');
-    const irEl = document.getElementById('ir-value');
-    const uvEl = document.getElementById('uv-value');
-    const timeEl = document.getElementById('sensor-time');
-    const lightForm = document.getElementById('light-form');
-    const modeSelect = document.getElementById('mode-select');
-    const colorPicker = document.getElementById('color-picker');
+    const navLinks = Array.from(document.querySelectorAll('#nav a'));
+    const pages = Array.from(document.querySelectorAll('.page'));
+
+    function showPage(pageId) {
+      pages.forEach(p => p.classList.toggle('active', p.dataset.page === pageId));
+      navLinks.forEach(l => l.classList.toggle('active', l.dataset.page === pageId));
+    }
+
+    navLinks.forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        showPage(link.dataset.page);
+      });
+    });
+
+    // Draggable widgets
+    const area = document.getElementById('widget-area');
+    let dragItem = null;
+    let offset = { x: 0, y: 0 };
+
+    area.addEventListener('dragstart', (e) => {
+      dragItem = e.target.closest('.widget');
+      if (!dragItem) return;
+      const rect = dragItem.getBoundingClientRect();
+      offset.x = e.clientX - rect.left;
+      offset.y = e.clientY - rect.top;
+    });
+
+    area.addEventListener('dragover', (e) => {
+      e.preventDefault();
+    });
+
+    area.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!dragItem) return;
+      const rect = area.getBoundingClientRect();
+      const x = e.clientX - rect.left - offset.x;
+      const y = e.clientY - rect.top - offset.y;
+      dragItem.style.left = Math.max(0, x) + 'px';
+      dragItem.style.top = Math.max(0, y) + 'px';
+      dragItem = null;
+    });
+
+    // Sensor live data
+    const liveGrid = document.getElementById('live-grid');
+
+    function renderSensors(sensors) {
+      liveGrid.innerHTML = '';
+      sensors.forEach(sensor => {
+        const card = document.createElement('div');
+        card.className = 'metric';
+        const statusColor = !sensor.enabled ? '#64748b' : sensor.ready ? '#4ade80' : '#f59e0b';
+        card.innerHTML = `
+          <div>Sunlight #${sensor.index} <span class="status-dot" style="background:${statusColor}"></span></div>
+          <div class="value">${sensor.enabled && sensor.ready ? sensor.visible.toFixed(1) + ' lux' : '--'}</div>
+          <small>IR: ${sensor.enabled && sensor.ready ? sensor.ir.toFixed(1) : '--'} · UV: ${sensor.enabled && sensor.ready ? sensor.uv.toFixed(2) : '--'}</small>
+          <small>Updated ${sensor.enabled && sensor.ready ? (sensor.timestamp / 1000).toFixed(1) + 's' : 'n/a'}</small>
+        `;
+        liveGrid.appendChild(card);
+      });
+    }
 
     async function fetchSensors() {
       try {
         const res = await fetch('/api/sensors');
         const json = await res.json();
-        if (json.ready) {
-          statusDot.style.background = '#4ade80';
-          statusLabel.textContent = 'Streaming';
-          visEl.textContent = json.visible.toFixed(1);
-          irEl.textContent = json.ir.toFixed(1);
-          uvEl.textContent = json.uv.toFixed(2);
-          timeEl.textContent = (json.timestamp / 1000).toFixed(1) + 's';
-        } else {
-          statusDot.style.background = '#f59e0b';
-          statusLabel.textContent = 'Sensor unavailable';
-          visEl.textContent = irEl.textContent = uvEl.textContent = '--';
-          timeEl.textContent = 'never';
-        }
+        renderSensors(json.sensors || []);
       } catch (e) {
-        statusDot.style.background = '#ef4444';
-        statusLabel.textContent = 'Fetch failed';
         console.error(e);
       }
     }
 
-    lightForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
+    const lightSubmit = document.getElementById('light-submit');
+    const modeSelect = document.getElementById('mode-select');
+    const colorPicker = document.getElementById('color-picker');
+
+    lightSubmit.addEventListener('click', async () => {
       const body = new URLSearchParams();
       body.set('mode', modeSelect.value);
       body.set('color', colorPicker.value);
@@ -533,15 +702,7 @@ void setupWebUi() {
 
   server.on("/api/sensors", HTTP_GET, [](AsyncWebServerRequest *request) {
     refreshSunlightReadings();
-    String json = "{";
-    json += "\"ready\":";
-    json += sunlightReady ? "true" : "false";
-    json += ",\"visible\":" + String(currentReadings.visible);
-    json += ",\"ir\":" + String(currentReadings.ir);
-    json += ",\"uv\":" + String(currentReadings.uv);
-    json += ",\"timestamp\":" + String(currentReadings.timestamp);
-    json += "}";
-    request->send(200, "application/json", json);
+    request->send(200, "application/json", buildSensorsJson());
   });
 
   server.on("/api/light", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -584,6 +745,19 @@ void setupWebUi() {
     config.i2cScl = static_cast<uint8_t>(arg("sclpin").toInt());
     config.sunlightTopic = arg("suntopic");
 
+    uint8_t requestedCount = clampValue<uint8_t>(arg("sun_count").toInt(), 1, kMaxSunlightSensors);
+    config.sunlightCount = requestedCount;
+
+    for (size_t i = 0; i < kMaxSunlightSensors; ++i) {
+      String idx = String(i);
+      String enKey = "sun_en" + idx;
+      bool enabled = request->hasArg(enKey.c_str()) && request->arg(enKey.c_str()) == "on";
+      config.sunlight[i].enabled = enabled;
+      config.sunlight[i].address = static_cast<uint8_t>(arg("sun_addr" + idx).toInt());
+      config.sunlight[i].sda = static_cast<uint8_t>(arg("sun_sda" + idx).toInt());
+      config.sunlight[i].scl = static_cast<uint8_t>(arg("sun_scl" + idx).toInt());
+    }
+
     saveConfig();
     request->send(200, "text/html", "<html><body><h2>Saved!</h2><p>Rebooting...</p></body></html>");
     delay(1000);
@@ -593,14 +767,25 @@ void setupWebUi() {
   server.begin();
 }
 
-void configureSunlightSensor() {
-  Wire.end();
-  Wire.begin(config.i2cSda, config.i2cScl);
-  sunlightReady = sunlightSensor.begin();
-  if (!sunlightReady) {
-    Serial.println("Sunlight sensor not detected. Check wiring and pins in UI.");
-  } else {
-    Serial.println("Sunlight sensor ready.");
+void configureSunlightSensors() {
+  sunlightReady.fill(false);
+  for (auto &reading : sensorReadings) {
+    reading = {};
+  }
+
+  for (size_t i = 0; i < config.sunlightCount && i < kMaxSunlightSensors; ++i) {
+    const auto &cfg = config.sunlight[i];
+    if (!cfg.enabled) {
+      continue;
+    }
+    Wire.end();
+    Wire.begin(cfg.sda, cfg.scl);
+    sunlightReady[i] = sunlightSensors[i].begin(cfg.address);
+    if (sunlightReady[i]) {
+      Serial.printf("Sunlight sensor %u ready on addr 0x%02X (SDA %u / SCL %u)\n", static_cast<unsigned>(i + 1), cfg.address, cfg.sda, cfg.scl);
+    } else {
+      Serial.printf("Sunlight sensor %u not detected. Address 0x%02X\n", static_cast<unsigned>(i + 1), cfg.address);
+    }
   }
 }
 
@@ -615,7 +800,7 @@ void setup() {
   setStatusLED(pixels.Color(16, 0, 16));
 
   connectWifi();
-  configureSunlightSensor();
+  configureSunlightSensors();
   setupWebUi();
   connectMqtt();
 }
