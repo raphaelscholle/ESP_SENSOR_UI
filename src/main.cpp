@@ -26,7 +26,7 @@ static Preferences preferences;
 static WiFiClient wifiClient;
 static PubSubClient mqttClient(wifiClient);
 static AsyncWebServer server(80);
-static Adafruit_NeoPixel pixels(config.wsCount, config.wsPin, NEO_GRB + NEO_KHZ800);
+static Adafruit_NeoPixel pixels(config.wsCount, config.wsPin, NEO_RGB + NEO_KHZ800);
 static std::array<Adafruit_SI1145, kMaxSunlightSensors> sunlightSensors;
 static std::array<bool, kMaxSunlightSensors> sunlightReady;
 
