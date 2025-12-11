@@ -750,7 +750,8 @@ void setupWebUi() {
 
     for (size_t i = 0; i < kMaxSunlightSensors; ++i) {
       String idx = String(i);
-      bool enabled = request->hasArg("sun_en" + idx) && request->arg("sun_en" + idx) == "on";
+      String enKey = "sun_en" + idx;
+      bool enabled = request->hasArg(enKey.c_str()) && request->arg(enKey.c_str()) == "on";
       config.sunlight[i].enabled = enabled;
       config.sunlight[i].address = static_cast<uint8_t>(arg("sun_addr" + idx).toInt());
       config.sunlight[i].sda = static_cast<uint8_t>(arg("sun_sda" + idx).toInt());
