@@ -25,12 +25,12 @@ struct DeviceConfig {
   String mqttUser = "";
   String mqttPassword = "";
   String baseTopic = "esp/sensors";
-  uint8_t wsPin = 8;            // Onboard WS2812B pin on ESP32-C3-Zero
+  uint8_t wsPin = 10;            // Onboard WS2812B pin on ESP32-C3-Zero
   uint16_t wsCount = 1;         // Single on-board pixel
   String wsTopic = "light/ws2812";
   String sunlightTopic = "sunlight";
-  uint8_t i2cSda = 6;           // Default pins for ESP32-C3
-  uint8_t i2cScl = 7;
+  uint8_t i2cSda = 3;           // Default pins for ESP32-C3
+  uint8_t i2cScl = 2;
   uint8_t sunlightCount = 1;
   SunlightSensorConfig sunlight[4];
 };
