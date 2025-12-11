@@ -33,7 +33,9 @@ static Adafruit_NeoPixel pixels(config.wsCount, config.wsPin, NEO_GRB + NEO_KHZ8
 static Adafruit_SI1145 sunlightSensor;
 static bool sunlightReady = false;
 static unsigned long lastPublish = 0;
+static unsigned long lastSensorRead = 0;
 static const unsigned long publishInterval = 10 * 1000UL;
+static const unsigned long sensorRefreshInterval = 2000UL;
 static const char *apSsid = "ESP-Sensor-UI";
 static const char *apPassword = "configureme";
 
@@ -48,6 +50,15 @@ static WsMode wsMode = WsMode::OFF;
 static uint32_t wsColor = 0;
 static uint32_t effectStart = 0;
 
+struct SensorReadings {
+  float visible = NAN;
+  float ir = NAN;
+  float uv = NAN;
+  unsigned long timestamp = 0;
+};
+
+static SensorReadings currentReadings;
+
 // Forward declarations
 void saveConfig();
 void setupWebUi();
@@ -56,6 +67,7 @@ void connectMqtt();
 void handleWsMessage(const String &payload);
 void configureSunlightSensor();
 void publishSunlight();
+void refreshSunlightReadings();
 void updatePixels();
 
 String urlEncode(const String &value) {
@@ -260,14 +272,24 @@ void publishSunlight() {
   if (!sunlightReady || !mqttClient.connected()) {
     return;
   }
-  float vis = sunlightSensor.readVisible();
-  float ir = sunlightSensor.readIR();
-  float uv = sunlightSensor.readUV() / 100.0; // library returns *100
+  refreshSunlightReadings();
 
   String topicBase = config.baseTopic + "/" + config.sunlightTopic;
-  mqttClient.publish((topicBase + "/visible").c_str(), String(vis).c_str(), true);
-  mqttClient.publish((topicBase + "/ir").c_str(), String(ir).c_str(), true);
-  mqttClient.publish((topicBase + "/uv").c_str(), String(uv).c_str(), true);
+  mqttClient.publish((topicBase + "/visible").c_str(), String(currentReadings.visible).c_str(), true);
+  mqttClient.publish((topicBase + "/ir").c_str(), String(currentReadings.ir).c_str(), true);
+  mqttClient.publish((topicBase + "/uv").c_str(), String(currentReadings.uv).c_str(), true);
+}
+
+void refreshSunlightReadings() {
+  if (!sunlightReady) {
+    currentReadings = {};
+    return;
+  }
+
+  currentReadings.visible = sunlightSensor.readVisible();
+  currentReadings.ir = sunlightSensor.readIR();
+  currentReadings.uv = sunlightSensor.readUV() / 100.0; // library returns *100
+  currentReadings.timestamp = millis();
 }
 
 String generatePage() {
@@ -282,26 +304,39 @@ String generatePage() {
 <title>ESP32-C3 Sensor UI</title>
 <style>
   body { font-family: 'Inter', system-ui, sans-serif; background: radial-gradient(circle at 10% 20%, #18152a, #0d0a1a 60%); color: #f2f2fb; margin: 0; padding: 0; }
-  .shell { max-width: 940px; margin: 32px auto; padding: 20px; }
+  .shell { max-width: 1080px; margin: 32px auto; padding: 20px; }
   .card { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); backdrop-filter: blur(12px); }
-  h1 { letter-spacing: 0.5px; font-size: 26px; margin-top: 0; display: flex; align-items: center; gap: 10px; }
+  h1 { letter-spacing: 0.5px; font-size: 26px; margin-top: 0; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   h2 { color: #a7b9ff; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; margin: 24px 0 12px; }
   form { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
   label { font-size: 12px; color: #8ea0d0; text-transform: uppercase; letter-spacing: 0.5px; }
-  input { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.08); color: #fff; font-size: 14px; }
-  input:focus { outline: 2px solid #6b8cff; }
+  input, select { width: 100%; padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.08); color: #fff; font-size: 14px; box-sizing: border-box; }
+  input:focus, select:focus { outline: 2px solid #6b8cff; }
   .accent { color: #6bffdf; }
   .actions { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
   button { padding: 12px 18px; border-radius: 12px; border: none; color: #0b0b16; background: linear-gradient(120deg, #6bffdf, #6b8cff); font-weight: 700; letter-spacing: 0.5px; cursor: pointer; box-shadow: 0 12px 30px rgba(107, 143, 255, 0.3); }
   .badge { background: rgba(255,255,255,0.07); padding: 6px 10px; border-radius: 10px; display: inline-block; margin-left: 10px; font-size: 12px; color: #9bd4ff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; align-items: start; }
+  .pill-nav { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; list-style: none; }
+  .pill-nav a { text-decoration: none; color: #cdd7ff; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); display: inline-flex; gap: 8px; align-items: center; }
+  .pill-nav a:hover { background: rgba(255,255,255,0.12); }
+  .metric { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 4px; }
+  .metric .value { font-size: 24px; font-weight: 700; color: #fff; }
+  .metric small { color: #9ab4ff; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #f39b39; display: inline-block; }
 </style>
 </head>
 <body>
   <div class="shell">
     <div class="card">
       <h1>ESP32-C3 Sensor Studio <span class="badge">Web UI</span></h1>
+      <ul class="pill-nav">
+        <li><a href="#config">Configuration</a></li>
+        <li><a href="#live">Live values</a></li>
+        <li><a href="#lighting">Lighting</a></li>
+      </ul>
       <p>Configure Wi-Fi, MQTT, and pins for the onboard <span class="accent">WS2812B</span> and <span class="accent">Grove Sunlight</span> modules without writing a line of code.</p>
-      <h2>Connectivity</h2>
+      <h2 id="config">Connectivity</h2>
       <form method="POST" action="/config">
         <div>
           <label>Wi-Fi SSID</label>
@@ -389,8 +424,102 @@ String generatePage() {
           <button type="submit">Save & Reboot</button>
         </div>
       </form>
+
+      <h2 id="live">Live sensor values</h2>
+      <div class="grid" id="sensor-grid">
+        <div class="metric">
+          <div>Visible light</div>
+          <div class="value" id="vis-value">--</div>
+          <small>lux</small>
+        </div>
+        <div class="metric">
+          <div>Infrared</div>
+          <div class="value" id="ir-value">--</div>
+          <small>irradiance</small>
+        </div>
+        <div class="metric">
+          <div>UV Index</div>
+          <div class="value" id="uv-value">--</div>
+          <small>index</small>
+        </div>
+        <div class="metric">
+          <div>Sensor status</div>
+          <div class="value"><span class="status-dot" id="sensor-status"></span> <span id="sensor-label">waiting...</span></div>
+          <small>Updated <span id="sensor-time">never</span></small>
+        </div>
+      </div>
+
+      <h2 id="lighting">LED animations</h2>
+      <form id="light-form">
+        <div>
+          <label>Mode</label>
+          <select name="mode" id="mode-select">
+            <option value="off">Off</option>
+            <option value="solid">Solid color</option>
+            <option value="rainbow">Rainbow</option>
+            <option value="breathe">Breathe</option>
+          </select>
+        </div>
+        <div>
+          <label>Color</label>
+          <input type="color" name="color" id="color-picker" value="#6bffdf" />
+        </div>
+        <div class="actions">
+          <button type="submit">Send to LED</button>
+        </div>
+      </form>
     </div>
   </div>
+  <script>
+    const statusDot = document.getElementById('sensor-status');
+    const statusLabel = document.getElementById('sensor-label');
+    const visEl = document.getElementById('vis-value');
+    const irEl = document.getElementById('ir-value');
+    const uvEl = document.getElementById('uv-value');
+    const timeEl = document.getElementById('sensor-time');
+    const lightForm = document.getElementById('light-form');
+    const modeSelect = document.getElementById('mode-select');
+    const colorPicker = document.getElementById('color-picker');
+
+    async function fetchSensors() {
+      try {
+        const res = await fetch('/api/sensors');
+        const json = await res.json();
+        if (json.ready) {
+          statusDot.style.background = '#4ade80';
+          statusLabel.textContent = 'Streaming';
+          visEl.textContent = json.visible.toFixed(1);
+          irEl.textContent = json.ir.toFixed(1);
+          uvEl.textContent = json.uv.toFixed(2);
+          timeEl.textContent = (json.timestamp / 1000).toFixed(1) + 's';
+        } else {
+          statusDot.style.background = '#f59e0b';
+          statusLabel.textContent = 'Sensor unavailable';
+          visEl.textContent = irEl.textContent = uvEl.textContent = '--';
+          timeEl.textContent = 'never';
+        }
+      } catch (e) {
+        statusDot.style.background = '#ef4444';
+        statusLabel.textContent = 'Fetch failed';
+        console.error(e);
+      }
+    }
+
+    lightForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = new URLSearchParams();
+      body.set('mode', modeSelect.value);
+      body.set('color', colorPicker.value);
+      try {
+        await fetch('/api/light', { method: 'POST', body });
+      } catch (err) {
+        console.error(err);
+      }
+    });
+
+    fetchSensors();
+    setInterval(fetchSensors, 3000);
+  </script>
 </body>
 </html>
 )HTML";
@@ -400,6 +529,43 @@ String generatePage() {
 void setupWebUi() {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/html", generatePage());
+  });
+
+  server.on("/api/sensors", HTTP_GET, [](AsyncWebServerRequest *request) {
+    refreshSunlightReadings();
+    String json = "{";
+    json += "\"ready\":";
+    json += sunlightReady ? "true" : "false";
+    json += ",\"visible\":" + String(currentReadings.visible);
+    json += ",\"ir\":" + String(currentReadings.ir);
+    json += ",\"uv\":" + String(currentReadings.uv);
+    json += ",\"timestamp\":" + String(currentReadings.timestamp);
+    json += "}";
+    request->send(200, "application/json", json);
+  });
+
+  server.on("/api/light", HTTP_POST, [](AsyncWebServerRequest *request) {
+    auto arg = [&](const String &name) { return request->arg(name); };
+    String mode = arg("mode");
+    String color = arg("color");
+
+    mode.toLowerCase();
+    if (mode == "solid") {
+      wsMode = WsMode::SOLID;
+      wsColor = parseColor(color);
+    } else if (mode == "rainbow") {
+      wsMode = WsMode::RAINBOW;
+    } else if (mode == "breathe") {
+      wsMode = WsMode::BREATHE;
+      wsColor = parseColor(color);
+    } else {
+      wsMode = WsMode::OFF;
+      wsColor = 0;
+    }
+    effectStart = millis();
+    updatePixels();
+
+    request->send(200, "application/json", "{\"ok\":true}");
   });
 
   server.on("/config", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -467,6 +633,11 @@ void loop() {
   if (now - lastPublish > publishInterval) {
     lastPublish = now;
     publishSunlight();
+  }
+
+  if (now - lastSensorRead > sensorRefreshInterval) {
+    lastSensorRead = now;
+    refreshSunlightReadings();
   }
 
   updatePixels();
