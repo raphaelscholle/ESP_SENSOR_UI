@@ -387,7 +387,6 @@ String generatePage() {
   .accent { color: #6bffdf; }
   .actions { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; }
   button { padding: 12px 18px; border-radius: 12px; border: none; color: #0b0b16; background: linear-gradient(120deg, #6bffdf, #6b8cff); font-weight: 700; letter-spacing: 0.5px; cursor: pointer; box-shadow: 0 12px 30px rgba(107, 143, 255, 0.3); }
-  .badge { background: rgba(255,255,255,0.07); padding: 6px 10px; border-radius: 10px; display: inline-block; margin-left: 10px; font-size: 12px; color: #9bd4ff; }
   .pill-nav { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; padding: 0; list-style: none; }
   .pill-nav a { text-decoration: none; color: #cdd7ff; padding: 8px 12px; border-radius: 999px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); display: inline-flex; gap: 8px; align-items: center; }
   .pill-nav a.active, .pill-nav a:hover { background: rgba(255,255,255,0.12); }
@@ -397,16 +396,13 @@ String generatePage() {
   .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #f39b39; display: inline-block; }
   .page { display: none; }
   .page.active { display: block; }
-  .draggable-area { position: relative; min-height: 340px; border: 1px dashed rgba(255,255,255,0.2); border-radius: 16px; overflow: hidden; padding: 12px; }
-  .widget { position: absolute; top: 20px; left: 20px; padding: 12px 14px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); border-radius: 12px; cursor: grab; user-select: none; }
-  .widget:active { cursor: grabbing; }
   .switch-row { display: flex; align-items: center; gap: 10px; }
 </style>
 </head>
 <body>
   <div class="shell">
     <div class="card">
-      <h1>ESP32-C3 Sensor Studio <span class="badge">Multi-page UI</span></h1>
+      <h1>ESP32-C3 Sensor Studio</h1>
       <ul class="pill-nav" id="nav">
         <li><a href="#home" data-page="home" class="active">Home</a></li>
         <li><a href="#wifi" data-page="wifi">Wi-Fi</a></li>
@@ -424,8 +420,6 @@ String generatePage() {
 
       <form id="config-form" method="POST" action="/config">
         <section class="page active" data-page="home">
-          <h2>Draggable widget canvas</h2>
-          <p>Drop and rearrange sensor summary widgets. Live data updates every few seconds.</p>
           <h2>Live sensor values</h2>
           <div class="grid" id="live-grid"></div>
         </section>
@@ -608,34 +602,6 @@ String generatePage() {
         e.preventDefault();
         showPage(link.dataset.page);
       });
-    });
-
-    // Draggable widgets
-    const area = document.getElementById('widget-area');
-    let dragItem = null;
-    let offset = { x: 0, y: 0 };
-
-    area.addEventListener('dragstart', (e) => {
-      dragItem = e.target.closest('.widget');
-      if (!dragItem) return;
-      const rect = dragItem.getBoundingClientRect();
-      offset.x = e.clientX - rect.left;
-      offset.y = e.clientY - rect.top;
-    });
-
-    area.addEventListener('dragover', (e) => {
-      e.preventDefault();
-    });
-
-    area.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (!dragItem) return;
-      const rect = area.getBoundingClientRect();
-      const x = e.clientX - rect.left - offset.x;
-      const y = e.clientY - rect.top - offset.y;
-      dragItem.style.left = Math.max(0, x) + 'px';
-      dragItem.style.top = Math.max(0, y) + 'px';
-      dragItem = null;
     });
 
     // Sensor live data
